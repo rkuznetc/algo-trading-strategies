@@ -4,42 +4,80 @@ import matplotlib.pyplot as plt
 
 
 def neutralize(matrix : pd.DataFrame) -> pd.DataFrame:
+    """
+        Neutralizes dataframe by row (sum of elements in row equals 0)
+    """
     return matrix.sub(matrix.mean(axis=1), axis=0)
 
 
 def normalize(matrix : pd.DataFrame) -> pd.DataFrame:
+    """
+        ### Normalizes dataframe by row (sum of abs(elements) in row equals 1)
+    """
     return matrix.div(matrix.abs().sum(axis=1), axis=0)
 
 
 def calculate_returns(close_df : pd.DataFrame) -> pd.DataFrame:
+    """
+        Returns pnl (return) using the following formula:
+        
+                return(d) = close(d) / close(d-1) - 1
+    """
     return close_df.pct_change()
 
 
 def calculate_holding_pnl(alpha : pd.DataFrame, returns : pd.DataFrame) -> pd.Series:
+    """
+        Returns holding pnl (Profit and Loss) vector using the following formula:
+                pnl = (alpha(d-1), returns(d))
+    """
     return (alpha.shift(1) * returns).sum(axis=1)
 
 
 def calculate_turnover(alpha : pd.DataFrame) -> pd.DataFrame:
+    """
+        Returns turnover vector using the following formula:
+                turnover = sum(|a(d) - a(d-1)|)
+    """
     return alpha.diff().abs().sum(axis=1)
 
 
 def calculate_Sharpe_ratio(pnl_vector : pd.Series, T = 252) -> float:
+    """
+        Return Sharpe ratio using the following formula:
+                Sharpe(T) = sqrt(T) * mean(pnl) / std(pnl)
+    """
     mean = pnl_vector.mean()
     std = pnl_vector.std()
     return mean / std * np.sqrt(T)
 
 
 def calculate_cumpnl(pnl : pd.Series) -> pd.Series:
+    """
+        Returns accumulated sum for PNL
+    """
     return pnl.cumsum()
 
 
 def calculate_drawdown(cum_pnl : pd.Series) -> float:
+    """
+        Returns drawdowns for full time period using the following formula
+                drawdown(T) = max(cumpnl(T1) - cumpnl(T2))
+
+        , 0 <= T1 <= T2 <= T
+    """
     running_max = cum_pnl.cummax()
     drawdown = running_max - cum_pnl
     return drawdown.max()
 
 
 def truncate(df : pd.DataFrame, threshold) -> pd.DataFrame:
+    """
+        Returns truncted dataframe. Steps, which are followed:
+            - clipping every value using argument "threshold"
+            - normalize and neutralize positive value by row
+            - normalize and neutralize negative value by row
+    """
     # truncate
     truncated_df = df.copy()
     mask = truncated_df.abs() > threshold
@@ -66,16 +104,25 @@ def truncate(df : pd.DataFrame, threshold) -> pd.DataFrame:
 
 
 def rank_df(df : pd.DataFrame) -> pd.DataFrame:
+    """
+        Returns ranked dataframe by row
+    """
     ranked_df = df.rank(axis=1, method="first") - 1
     denom = ranked_df.count(axis=1).replace(0, np.nan)
     return ranked_df.div(denom, axis=0)
 
 
 def calculate_volatility(returns : pd.DataFrame, T : int = 60) -> pd.Series: 
+    """
+        Returns volatility for each asset as standard deviation from last T days
+    """
     return returns.iloc[returns.shape[0] - T:].std(axis=0)
 
 
-def CutOutliers(df : pd.DataFrame, n : int) -> pd.DataFrame: 
+def CutOutliers(df : pd.DataFrame, n : int) -> pd.DataFrame:
+    """
+        Returns dataframe, where N outlier values are nullyfied 
+    """
     ranks = df.rank(axis=1)
     columns_num = df.shape[1]
     mask = (ranks <= n) | (ranks > columns_num - n)
@@ -83,6 +130,9 @@ def CutOutliers(df : pd.DataFrame, n : int) -> pd.DataFrame:
 
 
 def CutMiddle(df : pd.DataFrame, n : int) -> pd.DataFrame:
+    """
+        Returns dataframe, where N middle values are nullyfied 
+    """
     columns_num = df.shape[1]
     if n >= columns_num:
         return df * 0
@@ -95,6 +145,9 @@ def CutMiddle(df : pd.DataFrame, n : int) -> pd.DataFrame:
 
 
 def calculate_alphas_corr(pnl1 : pd.Series, pnl2 : pd.Series) -> float:
+    """
+        Returns correlation value between two alphas (as correlation between their PNL vectors)
+    """
     return pnl1.corr(pnl2)
 
 
@@ -118,7 +171,7 @@ class AlphaStats:
         Methods:
             - plot_cumpnl (график доходности за всю историю)
 
-            - print_Sharpe_ratios (коэффициенты Шарпа за каждый год_
+            - print_Sharpe_ratios (коэффициенты Шарпа за каждый год
             - print_turnovers (средний оборот за каждый год)
             - print_sum_pnls (суммарная доходность за каждый год)
             - print_drawdowns (максимальные просадки за каждый год)
@@ -172,3 +225,24 @@ class AlphaStats:
             drawdown_yr = calculate_drawdown(self.cumpnl.loc[str(year)])
             print(f"Максимальная просадка за {year} год: {drawdown_yr}")
         print("\n")
+
+    def print_all_stats(self):
+        self.print_Sharpe_ratios()
+        self.print_turnovers()
+        self.print_drawdowns()
+        self.print_sum_pnls()
+
+    def print_average_stats(self): # except Sharpe ratio and sum PNL
+        all_years = self.close.index.year.unique()
+
+        drawdowns = 0.
+        turnovers = 0.
+        for year in all_years:
+            drawdowns += calculate_drawdown(self.cumpnl.loc[str(year)])
+            turnovers += calculate_turnover(self.alpha.loc[str(year)])
+
+        try:        
+            print(f"Средние просадки за {len(all_years)} лет равны: {drawdowns / len(all_years)}")
+            print(f"Средний оборот за {len(all_years)} лет равен: {turnovers / len(all_years)}")
+        except ZeroDivisionError:
+            print(f"В датасете количество лет равно 0 (zero divison error)")
