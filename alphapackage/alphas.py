@@ -68,7 +68,8 @@ class BaseAlpha(ABC):
         return {
             # 'average_drawdown' : drawdown_av,
             'average_turnover' : turnover_av,
-            'average_Sharpe' : sharpes.mean()
+            'average_Sharpe' : sharpes.mean(),
+            'sum_pnl' : self.cumpnl[-1]
         }
     
     def plot_cumpnl(self) -> None:

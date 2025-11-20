@@ -141,3 +141,31 @@ def ts_mean(df: pd.DataFrame, win: int) -> pd.DataFrame:
         Returns time-series rolling mean of dataframe values within window
     """
     return df.rolling(win).mean()
+
+
+def ts_correlation(df1: pd.DataFrame, df2: pd.DataFrame, win: int) -> pd.DataFrame:
+    """
+        Returns time-series rolling correlation between two dataframes for the past win rows
+    """
+    return df1.rolling(win).corr(df2)
+
+
+def ts_covariance(df1: pd.DataFrame, df2: pd.DataFrame, win: int) -> pd.DataFrame:
+    """
+        Returns time-series rolling covariance between two dataframes for the past win rows
+    """
+    return df1.rolling(win).cov(df2)
+
+
+def ts_max(df: pd.DataFrame, win: int) -> pd.DataFrame:
+    """
+        Returns time-series rolling max of dataframe values within window
+    """
+    return df.rolling(win).max()
+
+
+def ts_min(df: pd.DataFrame, win: int) -> pd.DataFrame:
+    """
+        Returns time-series rolling min of dataframe values within window
+    """
+    return df.rolling(win).min()
