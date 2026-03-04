@@ -169,3 +169,10 @@ def ts_min(df: pd.DataFrame, win: int) -> pd.DataFrame:
         Returns time-series rolling min of dataframe values within window
     """
     return df.rolling(win).min()
+
+
+def stddev(df: pd.DataFrame, win: int) -> pd.DataFrame:
+    """
+        Returns time-series standard deviation of dataframe values within window
+    """
+    return df.rolling(win).std()

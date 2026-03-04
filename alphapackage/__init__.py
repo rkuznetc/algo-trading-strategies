@@ -1,5 +1,4 @@
-from .alphaops import *
-from .alphas import *
+from .core import *
 from .data_utils import DataHolder
 from .operators import *
 
