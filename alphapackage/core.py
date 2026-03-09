@@ -102,8 +102,6 @@ class BasePortfolio(BaseAlpha, ABC):
             weights = self.generate_alpha_weights(d, dh)
             reb_df.loc[d] = weights.reindex(alpha_names).fillna(0.0)
 
-        # normalize weights
-        reb_df = reb_df.div(reb_df.abs().sum(axis=1), axis=0).fillna(0.0)
         self.alpha_weights_rebalance = reb_df
 
         # forward-fill to daily

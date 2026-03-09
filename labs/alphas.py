@@ -1,13 +1,15 @@
+from typing import Dict
+
 import pandas as pd
 import numpy as np
-from matplotlib import pyplot as plt
-import seaborn as sns
+import cvxpy as cp
 
 from alphapackage.operators import *
 from alphapackage.data_utils import DataHolder
 from alphapackage.core import BaseAlpha, BasePortfolio
 
 
+# Heuristic portfolios
 class PortfolioEqual(BasePortfolio):
     def generate_alpha_weights(self, date: pd.Timestamp, dh: 'DataHolder') -> pd.Series:
         names = list(self.alphas.keys())
@@ -122,6 +124,7 @@ class PortfolioPNL(BasePortfolio):
 
         return weights
 
+
 class PortfolioCorr(BasePortfolio):
     """
         Weights:        ~ sum(corr(other_alpha)) for last 1 month
@@ -178,6 +181,398 @@ class PortfolioCorr(BasePortfolio):
         return weights
 
 
+# Markowitz potfolios
+# EPS_REG = 1e-8
+
+def _build_R_C(alphas: Dict[str, BaseAlpha], date: pd.Timestamp, dh: 'DataHolder',
+               lookback_months: int = 12, use_full_history: bool = False):
+    """
+        Returns (R, C, alpha_names) inside time-series window (start_date, date)
+            - R - vector of expected returns
+            - C - alpha correlation matrix
+            - alpha_names - list with alpha names
+
+        Default time-series window = 12 months
+        Optional = full history
+    """
+    alpha_names = list(alphas.keys())
+    first_date = dh.data['close'].index[0]
+
+    if use_full_history:
+        start_date = first_date
+    else:
+        start_date = date - pd.DateOffset(months=lookback_months)
+        if start_date < first_date:
+            start_date = first_date
+
+    pnl_list = []
+    for name in alpha_names:
+        pnl = alphas[name].pnl[(alphas[name].pnl.index > start_date) & (alphas[name].pnl.index < date)].rename(name)
+        pnl_list.append(pnl)
+
+    if len(pnl_list) == 0:
+        return None, None, alpha_names
+
+    df = pd.concat(pnl_list, axis=1)
+    if df.shape[0] == 0:
+        return None, None, alpha_names
+
+    R = df.mean(axis=0).to_numpy()        # vector (k,)
+    C = df.corr().fillna(0.0).to_numpy()  # correlation matrix (k,k)
+    # C = C + EPS_REG * np.eye(C.shape[0])
+    return R, C, alpha_names
+
+
+class MarkowitzUnconstrained(BasePortfolio):
+    def __init__(self, alphas: Dict[str, BaseAlpha], freq: str = "QS",
+                 lookback_months: int = 12, use_full_history: bool = False):
+        super().__init__(alphas=alphas, frequency=freq)
+        self.lookback_months = int(lookback_months)
+        self.use_full_history = bool(use_full_history)
+
+    def generate_alpha_weights(self, date: pd.Timestamp, dh: 'DataHolder') -> pd.Series:
+        names = list(self.alphas.keys())
+        k = len(names)
+
+        # first rebalance -> equal
+        if self.rebalance_dates is None:
+            return pd.Series(1.0 / k, index=names)
+        pos = int(self.rebalance_dates.get_loc(date))
+        if pos == 0:
+            return pd.Series(1.0 / k, index=names)
+
+        R, C, alpha_names = _build_R_C(self.alphas, date, dh, self.lookback_months, self.use_full_history)
+        if R is None or C is None:
+            return pd.Series(1.0 / k, index=names)
+
+        x = cp.Variable(k)
+        objective = cp.Minimize(cp.quad_form(x, C))
+        constraints = [R.T @ x == 1]
+        prob = cp.Problem(objective, constraints)
+        # prob.solve(solver=cp.SCS, verbose=False)
+        prob.solve()
+        if x.value is None:
+            return pd.Series(1.0 / k, index=names)
+        return pd.Series(np.array(x.value).reshape(-1), index=alpha_names)
+
+
+class MarkowitzNonNegative(BasePortfolio):
+    def __init__(self, alphas: Dict[str, BaseAlpha], freq: str = "QS",
+                 lookback_months: int = 12, use_full_history: bool = False):
+        super().__init__(alphas=alphas, frequency=freq)
+        self.lookback_months = int(lookback_months)
+        self.use_full_history = bool(use_full_history)
+
+    def generate_alpha_weights(self, date: pd.Timestamp, dh: 'DataHolder') -> pd.Series:
+        names = list(self.alphas.keys())
+        k = len(names)
+
+        if self.rebalance_dates is None:
+            return pd.Series(1.0 / k, index=names)
+        pos = int(self.rebalance_dates.get_loc(date))
+        if pos == 0:
+            return pd.Series(1.0 / k, index=names)
+
+        R, C, alpha_names = _build_R_C(self.alphas, date, dh, self.lookback_months, self.use_full_history)
+        if R is None or C is None:
+            return pd.Series(1.0 / k, index=names)
+
+        x = cp.Variable(k)
+        objective = cp.Minimize(cp.quad_form(x, C))
+        constraints = [R.T @ x == 1, x >= 0]
+        prob = cp.Problem(objective, constraints)
+        # prob.solve(solver=cp.SCS, verbose=False)
+        prob.solve()
+        if x.value is None:
+            return pd.Series(1.0 / k, index=names)
+        return pd.Series(np.array(x.value).reshape(-1), index=alpha_names)
+
+
+class MarkowitzMinLower(BasePortfolio):
+    def __init__(self, alphas: Dict[str, BaseAlpha], freq: str = "QS",
+                 lookback_months: int = 12, use_full_history: bool = False):
+        super().__init__(alphas=alphas, frequency=freq)
+        self.lookback_months = int(lookback_months)
+        self.use_full_history = bool(use_full_history)
+
+    def generate_alpha_weights(self, date: pd.Timestamp, dh: 'DataHolder') -> pd.Series:
+        names = list(self.alphas.keys())
+        k = len(names)
+
+        if self.rebalance_dates is None:
+            return pd.Series(1.0 / k, index=names)
+        pos = int(self.rebalance_dates.get_loc(date))
+        if pos == 0:
+            return pd.Series(1.0 / k, index=names)
+
+        R, C, alpha_names = _build_R_C(self.alphas, date, dh, lookback_months=self.lookback_months,
+                                       use_full_history=self.use_full_history)
+        if R is None or C is None:
+            return pd.Series(1.0 / k, index=names)
+
+        # build matrix U
+        v_base = np.full(k, 1.0 / (2.0 * k), dtype=float)
+        V = np.zeros((k, k), dtype=float)  # rows == v_i
+        for i in range(k):
+            vi = v_base.copy()
+            vi[i] = (k + 1.0) / (2.0 * k)
+            V[i, :] = vi
+            
+        denom = V @ R  # denom[i] = v_i^T R
+        if np.any(np.isclose(denom, 0.0, atol=1e-12)):
+            return pd.Series(1.0 / k, index=names)
+
+        U = (V.T / denom).T
+
+        try:
+            invU = np.linalg.inv(U)
+        except np.linalg.LinAlgError:
+            return pd.Series(1.0 / k, index=names)
+
+        # OPTIMIZATION
+        # invU * e_j == col j of invU
+        # invU_cols = invU  # invU[:, j] is vector for constraint j
+
+        x = cp.Variable(k)
+        objective = cp.Minimize(cp.quad_form(x, C))
+
+        constraints = [R.T @ x == 1]
+        for j in range(k):
+            vec = invU[:, j]
+            vec = vec.astype(float)
+            constraints.append(vec @ x >= 0)
+
+        prob = cp.Problem(objective, constraints)
+        prob.solve()
+
+        if x.value is None:
+            return pd.Series(1.0 / k, index=names)
+
+        return pd.Series(np.array(x.value).reshape(-1), index=alpha_names)
+
+
+# Risk portfolios
+EPS_REG = 1e-8
+
+class PortfolioRiskBudgetEqual(BasePortfolio):
+    def __init__(self, alphas: Dict[str, BaseAlpha],
+                 freq: str = "QS",
+                 lookback_months: int = 12,
+                 use_full_history: bool = False):
+        super().__init__(alphas=alphas, frequency=freq)
+        self.lookback_months = int(lookback_months)
+        self.use_full_history = bool(use_full_history)
+        self._solver = cp.SCS
+
+    def generate_alpha_weights(self, date: pd.Timestamp, dh: 'DataHolder') -> pd.Series:
+
+        names = list(self.alphas.keys())
+        k = len(names)
+
+        if self.rebalance_dates is None:
+            return pd.Series(1.0 / k, index=names)
+
+        pos = int(self.rebalance_dates.get_loc(date))
+        if pos == 0:
+            return pd.Series(1.0 / k, index=names)
+
+        _, C, alpha_names = _build_R_C(
+            self.alphas,
+            date,
+            dh,
+            lookback_months=self.lookback_months,
+            use_full_history=self.use_full_history
+        )
+
+        if C is None:
+            return pd.Series(1.0 / k, index=names)
+
+        C = C + EPS_REG * np.eye(k)
+        b = np.full(k, 1.0 / k)
+        x = cp.Variable(k)
+
+        lb = 1e-12
+        constraints = [x >= lb, cp.sum(x) == 1]
+
+        objective = cp.Minimize(
+            0.5 * cp.quad_form(x, C)
+            - cp.sum(cp.multiply(b, cp.log(x)))
+        )
+
+        prob = cp.Problem(objective, constraints)
+
+        try:
+            prob.solve(solver=self._solver, verbose=False)
+        except Exception:
+            return pd.Series(1.0 / k, index=names)
+
+        if x.value is None or np.any(np.isnan(x.value)):
+            return pd.Series(1.0 / k, index=names)
+
+        return pd.Series(np.array(x.value).reshape(-1), index=alpha_names)
+
+
+class PortfolioRiskBudgetSharpe(BasePortfolio):
+    def __init__(self, alphas, freq: str = "QS", lookback_months: int = 3, use_full_history: bool = False):
+        super().__init__(alphas=alphas, frequency=freq)
+        self.lookback_months = int(lookback_months)
+        self.use_full_history = bool(use_full_history)
+        self._solver = cp.SCS
+
+    def generate_alpha_weights(self, date: pd.Timestamp, dh: 'DataHolder') -> pd.Series:
+        names = list(self.alphas.keys()); k = len(names)
+        if self.rebalance_dates is None:
+            return pd.Series(1.0 / k, index=names)
+        pos = int(self.rebalance_dates.get_loc(date))
+        if pos == 0:
+            return pd.Series(1.0 / k, index=names)
+
+        # C using last 3 months window
+        R, C, alpha_names = _build_R_C(self.alphas, date, dh, lookback_months=self.lookback_months, use_full_history=False)
+        if C is None:
+            return pd.Series(1.0 / k, index=names)
+        C = C + EPS_REG * np.eye(k)
+
+        first_date = dh.data['close'].index[0]
+        start_date = date - pd.DateOffset(months=self.lookback_months)
+        if start_date < first_date:
+            start_date = first_date
+
+        sharpe_vals = []
+        for name in alpha_names:
+            pnl = self.alphas[name].pnl
+            s = pnl[(pnl.index > start_date) & (pnl.index < date)].dropna()
+            if s.size == 0 or s.std() == 0:
+                sharpe_vals.append(0.0)
+            else:
+                sharpe_vals.append((s.mean() / s.std()))
+        sharpe_arr = np.array(sharpe_vals, dtype=float)
+
+        b_raw = np.clip(sharpe_arr, a_min=0.0, a_max=None)
+        if b_raw.sum() == 0:
+            return pd.Series(1.0 / k, index=names)
+        b = b_raw / b_raw.sum()
+
+        x = cp.Variable(k)
+        lb = 1e-12
+        constraints = [x >= lb, cp.sum(x) == 1]
+        objective = cp.Minimize(0.5 * cp.quad_form(x, C) - cp.sum(cp.multiply(b, cp.log(x))))
+        prob = cp.Problem(objective, constraints)
+        try:
+            prob.solve(solver=self._solver, verbose=False)
+        except Exception:
+            return pd.Series(1.0 / k, index=names)
+
+        if x.value is None or np.any(np.isnan(x.value)):
+            return pd.Series(1.0 / k, index=names)
+        xval = np.maximum(np.array(x.value).reshape(-1), lb)
+        return pd.Series(xval, index=alpha_names)
+
+
+class PortfolioRiskBudgetPNL(BasePortfolio):
+    def __init__(self, alphas, freq: str = "QS", lookback_months: int = 3, use_full_history: bool = False):
+        super().__init__(alphas=alphas, frequency=freq)
+        self.lookback_months = int(lookback_months)
+        self.use_full_history = bool(use_full_history)
+        self._solver = cp.SCS
+
+    def generate_alpha_weights(self, date: pd.Timestamp, dh: 'DataHolder') -> pd.Series:
+        names = list(self.alphas.keys()); k = len(names)
+        if self.rebalance_dates is None:
+            return pd.Series(1.0 / k, index=names)
+        pos = int(self.rebalance_dates.get_loc(date))
+        if pos == 0:
+            return pd.Series(1.0 / k, index=names)
+
+        R, C, alpha_names = _build_R_C(self.alphas, date, dh, lookback_months=self.lookback_months, use_full_history=False)
+        if C is None:
+            return pd.Series(1.0 / k, index=names)
+        C = C + EPS_REG * np.eye(k)
+
+        first_date = dh.data['close'].index[0]
+        start_date = date - pd.DateOffset(months=self.lookback_months)
+        if start_date < first_date:
+            start_date = first_date
+
+        total_vals = []
+        for name in alpha_names:
+            pnl = self.alphas[name].pnl
+            s = pnl[(pnl.index > start_date) & (pnl.index < date)].dropna()
+            total_vals.append(s.sum() if s.size > 0 else 0.0)
+        total_arr = np.array(total_vals, dtype=float)
+
+        b_raw = np.clip(total_arr, a_min=0.0, a_max=None)
+        if b_raw.sum() == 0:
+            return pd.Series(1.0 / k, index=names)
+        b = b_raw / b_raw.sum()
+
+        x = cp.Variable(k)
+        lb = 1e-12
+        constraints = [x >= lb, cp.sum(x) == 1]
+        objective = cp.Minimize(0.5 * cp.quad_form(x, C) - cp.sum(cp.multiply(b, cp.log(x))))
+        prob = cp.Problem(objective, constraints)
+        try:
+            prob.solve(solver=self._solver, verbose=False)
+        except Exception:
+            return pd.Series(1.0 / k, index=names)
+
+        if x.value is None or np.any(np.isnan(x.value)):
+            return pd.Series(1.0 / k, index=names)
+        xval = np.maximum(np.array(x.value).reshape(-1), lb)
+        return pd.Series(xval, index=alpha_names)
+
+
+class PortfolioRiskBudgetStd(BasePortfolio):
+    def __init__(self, alphas, freq: str = "QS", lookback_months: int = 3, use_full_history: bool = False):
+        super().__init__(alphas=alphas, frequency=freq)
+        self.lookback_months = int(lookback_months)
+        self.use_full_history = bool(use_full_history)
+        self._solver = cp.SCS
+
+    def generate_alpha_weights(self, date: pd.Timestamp, dh: 'DataHolder') -> pd.Series:
+        names = list(self.alphas.keys()); k = len(names)
+        if self.rebalance_dates is None:
+            return pd.Series(1.0 / k, index=names)
+        pos = int(self.rebalance_dates.get_loc(date))
+        if pos == 0:
+            return pd.Series(1.0 / k, index=names)
+
+        R, C, alpha_names = _build_R_C(self.alphas, date, dh, lookback_months=self.lookback_months, use_full_history=False)
+        if C is None:
+            return pd.Series(1.0 / k, index=names)
+        C = C + EPS_REG * np.eye(k)
+
+        first_date = dh.data['close'].index[0]
+        start_date = date - pd.DateOffset(months=self.lookback_months)
+        if start_date < first_date:
+            start_date = first_date
+
+        std_vals = []
+        for name in alpha_names:
+            pnl = self.alphas[name].pnl
+            s = pnl[(pnl.index > start_date) & (pnl.index < date)].dropna()
+            std_vals.append(s.std() if s.size > 0 else 0.0)
+        std_arr = np.array(std_vals, dtype=float)
+
+        b_raw = np.clip(std_arr, a_min=0.0, a_max=None)  
+        if b_raw.sum() == 0:
+            return pd.Series(1.0 / k, index=names)
+        b = b_raw / b_raw.sum()
+
+        x = cp.Variable(k)
+        lb = 1e-12
+        constraints = [x >= lb, cp.sum(x) == 1]
+        objective = cp.Minimize(0.5 * cp.quad_form(x, C) - cp.sum(cp.multiply(b, cp.log(x))))
+        prob = cp.Problem(objective, constraints)
+        try:
+            prob.solve(solver=self._solver, verbose=False)
+        except Exception:
+            return pd.Series(1.0 / k, index=names)
+
+        if x.value is None or np.any(np.isnan(x.value)):
+            return pd.Series(1.0 / k, index=names)
+        xval = np.maximum(np.array(x.value).reshape(-1), lb)
+        return pd.Series(xval, index=alpha_names)
 
 
 ### Self-made alphas
